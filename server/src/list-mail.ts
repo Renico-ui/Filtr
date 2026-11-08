@@ -1,3 +1,12 @@
+/*
+  This file is a small practice script.
+
+  Run it with npm run list-mail from the server folder. It signs in to Gmail,
+  looks at the five newest inbox messages, and prints only the ones that
+  contain the word "invoice". It does not add labels. The real scanner is
+  server.ts. This file keeps its own copy of the sign-in steps so it can run
+  by itself.
+*/
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { authenticate } from "@google-cloud/local-auth";
@@ -6,7 +15,10 @@ const SCOPES = ["https://www.googleapis.com/auth/gmail.modify"];
 const CREDENTIALS_PATH = path.join(process.cwd(), "credentials.json");
 const TOKEN_PATH = path.join(process.cwd(), "token.json");
 
+// The only word this practice script looks for.
 const KEYWORDS = ["invoice"];
+
+// Return the keyword if the subject or preview contains it.
 function matchedKeyword(subject: string, preview: string): string | undefined {
     const haystack = `${subject}\n${preview}`.toLowerCase();
     return KEYWORDS.find((word) => haystack.includes(word.toLowerCase()));
@@ -23,7 +35,8 @@ type ClientKeys = {
     installed?: { client_id: string; client_secret: string };
     web?: { client_id: string; client_secret: string };
 };
-//Print the metadata value
+
+// Read one header, such as Subject or From, from a Gmail message.
 function header(
     headers: { name?: string | null; value?: string | null }[] | undefined,
     name: string
@@ -33,6 +46,8 @@ function header(
     );
     return found?.value ?? "(none)";
 }
+
+// Build a Gmail sign-in object from a permission that was saved earlier.
 function clientFromRefreshToken(
     clientId: string,
     clientSecret: string,
@@ -42,6 +57,8 @@ function clientFromRefreshToken(
     client.setCredentials({ refresh_token: refreshToken });
     return client;
 }
+
+// Read token.json. If it is missing, return nothing so the script can sign in.
 async function loadSavedAuth(): Promise<AuthClient | undefined> {
     try {
         const content = await readFile(TOKEN_PATH, "utf8");
@@ -55,11 +72,15 @@ async function loadSavedAuth(): Promise<AuthClient | undefined> {
         return undefined;
     }
 }
+
+// Read the program's id and secret from credentials.json.
 async function readClientKeys(): Promise<ClientKeys["installed"]> {
     const content = await readFile(CREDENTIALS_PATH, "utf8");
     const keys = JSON.parse(content) as ClientKeys;
     return keys.installed ?? keys.web;
 }
+
+// Save the sign-in permission so the next run can skip the browser.
 async function saveAuth(client: AuthClient): Promise<void> {
     const key = await readClientKeys();
     const refreshToken = client.credentials.refresh_token;
@@ -74,6 +95,8 @@ async function saveAuth(client: AuthClient): Promise<void> {
     };
     await writeFile(TOKEN_PATH, JSON.stringify(payload, null, 2));
 }
+
+// Return a signed-in Gmail client. Reuse token.json, or open the browser once.
 async function authorize(): Promise<AuthClient> {
     const saved = await loadSavedAuth();
     if (saved) {
@@ -97,6 +120,8 @@ async function authorize(): Promise<AuthClient> {
     await saveAuth(client);
     return client;
 }
+
+// Sign in, read five inbox messages, and print the ones that mention invoice.
 async function main(): Promise<void> {
     const auth = await authorize();
     const gmail = google.gmail({ version: "v1", auth });
@@ -140,6 +165,8 @@ async function main(): Promise<void> {
         console.log(`No inbox messages matched: ${KEYWORDS.join(", ")}`);
     }
 }
+
+// Start the script, and print the error if Gmail sign-in fails.
 main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);

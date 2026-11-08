@@ -1,3 +1,10 @@
+/*
+  This file is the local control page for keyword alerts.
+
+  It saves keywords in keywords.json, asks Gmail which recent inbox messages
+  contain those words, and puts a colored Keyword label plus the Important
+  marker on each match. Open http://127.0.0.1:4317 after running npm run serve.
+*/
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -11,8 +18,10 @@ const LABEL_COLORS = ["#fb4c2f", "#a479e2", "#ffad47", "#16a766", "#4a86e8"] as 
 const IMPORTANT_LABEL = "IMPORTANT";
 const CALL_DELAY_MS = 250;
 
+// The Gmail connection used by the functions below.
 type GmailClient = ReturnType<typeof google.gmail>;
 
+// One saved keyword. from is empty unless the word should match only some senders.
 type KeywordRule = {
   word: string;
   from: string[];
@@ -20,6 +29,7 @@ type KeywordRule = {
 
 type StoredKeyword = string | { word: string; from: string | string[] };
 
+// One matching email that the web page can show.
 type Hit = {
   keyword: string;
   subject: string;
@@ -28,18 +38,21 @@ type Hit = {
   isNew: boolean;
 };
 
+// The summary returned after a scan: matches, messages that did not match, and a count per word.
 type ScanReport = {
   hits: Hit[];
   skippedCount: number;
   perKeywordCounts: Record<string, number>;
 };
 
+// Pause so Gmail is not called too many times in one second.
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
 }
 
+// Read one header, such as Subject or From, from a Gmail message.
 function header(
   headers: { name?: string | null; value?: string | null }[] | undefined,
   name: string
@@ -50,6 +63,7 @@ function header(
   return found?.value ?? "(none)";
 }
 
+// Keep a short keyword made of letters, numbers, and spaces. Reject anything else.
 function cleanKeyword(value: string): string | undefined {
   const word = value.trim().toLowerCase();
   if (!/^[a-z0-9][a-z0-9 -]{0,40}$/.test(word)) {
@@ -58,6 +72,7 @@ function cleanKeyword(value: string): string | undefined {
   return word;
 }
 
+// Keep a sender such as google.com. Reject blank text and strange characters.
 function cleanSender(value: string): string | undefined {
   const sender = value.trim().toLowerCase();
   if (!/^[a-z0-9.-]+$/.test(sender)) {
@@ -66,6 +81,7 @@ function cleanSender(value: string): string | undefined {
   return sender;
 }
 
+// Turn one saved entry into a keyword. A plain string matches any sender.
 function parseRule(entry: unknown): KeywordRule | undefined {
   if (typeof entry === "string") {
     const word = cleanKeyword(entry);
@@ -99,6 +115,7 @@ function parseRule(entry: unknown): KeywordRule | undefined {
   return { word, from };
 }
 
+// Turn a keyword back into the simple form written in keywords.json.
 function storeRule(rule: KeywordRule): StoredKeyword {
   if (rule.from.length === 0) {
     return rule.word;
@@ -109,6 +126,7 @@ function storeRule(rule: KeywordRule): StoredKeyword {
   return { word: rule.word, from: rule.from };
 }
 
+// Read keywords.json. If the file is missing, use the word invoice.
 async function loadRules(): Promise<KeywordRule[]> {
   try {
     const parsed = JSON.parse(await readFile(KEYWORDS_PATH, "utf8")) as unknown;
@@ -124,11 +142,13 @@ async function loadRules(): Promise<KeywordRule[]> {
   }
 }
 
+// Write the keyword list back to keywords.json.
 async function saveRules(rules: KeywordRule[]): Promise<void> {
   const stored = rules.map((rule) => storeRule(rule));
   await writeFile(KEYWORDS_PATH, JSON.stringify(stored, null, 2));
 }
 
+// Pick a stable Gmail label color from the word, so the same word stays the same color.
 function colorForKeyword(word: string): string {
   let sum = 0;
   for (let index = 0; index < word.length; index += 1) {
@@ -137,6 +157,7 @@ function colorForKeyword(word: string): string {
   return LABEL_COLORS[sum] ?? LABEL_COLORS[0];
 }
 
+// How many days of mail to search. The default is 1. Set SCAN_DAYS to change it.
 function scanDays(): number {
   const parsed = Number(process.env.SCAN_DAYS ?? "1");
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 365) {
@@ -145,6 +166,7 @@ function scanDays(): number {
   return parsed;
 }
 
+// How often to scan automatically. 0 means only when the Check inbox button is clicked.
 function pollMinutes(): number {
   const parsed = Number(process.env.POLL_MINUTES ?? "0");
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -153,6 +175,7 @@ function pollMinutes(): number {
   return parsed;
 }
 
+// Build the Gmail search, including a sender filter when the keyword has one.
 function keywordQuery(rule: KeywordRule, days: number): string {
   const quoted = `"${rule.word.replaceAll('"', "")}"`;
   let query = `in:inbox ${quoted} newer_than:${days}d`;
@@ -164,6 +187,7 @@ function keywordQuery(rule: KeywordRule, days: number): string {
   return query;
 }
 
+// Ask Gmail for every message id that matches a search, one page at a time.
 async function listMessageIds(gmail: GmailClient, query: string): Promise<string[]> {
   const ids: string[] = [];
   let pageToken: string | undefined;
@@ -187,6 +211,7 @@ async function listMessageIds(gmail: GmailClient, query: string): Promise<string
   return ids;
 }
 
+// Find the Keyword/word label, or create it. Add a color if it does not have one yet.
 async function ensureLabel(gmail: GmailClient, word: string): Promise<string> {
   const name = `Keyword/${word}`;
   const background = colorForKeyword(word);
@@ -222,6 +247,7 @@ async function ensureLabel(gmail: GmailClient, word: string): Promise<string> {
   return created.data.id;
 }
 
+// Add the keyword label and Important to messages, in groups of up to 1000.
 async function applyLabels(
   gmail: GmailClient,
   messageIds: string[],
@@ -240,6 +266,7 @@ async function applyLabels(
   }
 }
 
+// Search the inbox for each keyword, label the matches, and count what was skipped.
 async function scan(): Promise<ScanReport> {
   const auth = await authorize();
   const gmail = google.gmail({ version: "v1", auth });
@@ -283,6 +310,7 @@ async function scan(): Promise<ScanReport> {
 
 let scanInProgress = false;
 
+// Run one scan, and refuse to start a second scan while the first is still going.
 async function runScan(): Promise<ScanReport> {
   if (scanInProgress) {
     throw new Error("A scan is already running.");
@@ -295,11 +323,13 @@ async function runScan(): Promise<ScanReport> {
   }
 }
 
+// Send a JSON reply back to the web page.
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "Content-Type": "application/json" });
   response.end(JSON.stringify(body));
 }
 
+// Read the text the browser sent with a request, such as a new keyword.
 async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
@@ -308,6 +338,7 @@ async function readBody(request: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+// The small web page with a keyword box and a Check inbox button.
 const page = `<!doctype html>
 <html lang="en">
 <head>
@@ -374,6 +405,7 @@ const page = `<!doctype html>
 </body>
 </html>`;
 
+// Answer the browser: show the page, save a keyword, or run a scan.
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -413,6 +445,7 @@ const server = createServer(async (request, response) => {
   }
 });
 
+// Start the page on this computer only, and scan on a timer when POLL_MINUTES is set.
 server.listen(PORT, "127.0.0.1", () => {
   console.log("Keyword alerts at http://127.0.0.1:" + PORT);
   const minutes = pollMinutes();

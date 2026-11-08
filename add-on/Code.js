@@ -1,10 +1,21 @@
+/*
+  This file is the Gmail sidebar.
+
+  It shows a menu, saves the words this person is watching, searches the last
+  30 days of the inbox, asks the Grok bot about each match, and labels the
+  messages the bot accepts. The bot address is GROK_URL in Script properties.
+*/
+
+// White text, and the Gmail colors used for a Keyword label.
 var LABEL_TEXT = "#ffffff";
 var LABEL_COLORS = ["#fb4c2f", "#a479e2", "#ffad47", "#16a765", "#4a86e8"];
 
+// Gmail calls this when the sidebar opens. Show the home menu.
 function onHomepage() {
   return buildHomeCard();
 }
 
+// Read the saved words for this Gmail user. If none are saved, use "invoice".
 function loadKeywords() {
   var raw = PropertiesService.getUserProperties().getProperty("keywords");
   if (raw === null) {
@@ -13,6 +24,7 @@ function loadKeywords() {
   return JSON.parse(raw);
 }
 
+// Draw the opening menu: Check inbox, Keywords, and Reset.
 function buildHomeCard() {
   var keywords = loadKeywords();
   var saved = keywords.length ? keywords.length + " saved" : "None saved";
@@ -47,6 +59,7 @@ function buildHomeCard() {
     .build();
 }
 
+// Draw one clickable row. The last argument is the function that runs when it is clicked.
 function menuRow(title, detail, icon, functionName) {
   return CardService.newDecoratedText()
     .setText(title)
@@ -56,12 +69,14 @@ function menuRow(title, detail, icon, functionName) {
     .setOnClickAction(CardService.newAction().setFunctionName(functionName));
 }
 
+// Open the keyword page on top of the home menu.
 function openKeywords() {
   return CardService.newActionResponseBuilder()
     .setNavigation(CardService.newNavigation().pushCard(buildKeywordsCard()))
     .build();
 }
 
+// Draw the saved words and the box used to add a new one.
 function buildKeywordsCard() {
   var keywords = loadKeywords();
   var section = CardService.newCardSection().setHeader("Saved words");
@@ -102,6 +117,7 @@ function buildKeywordsCard() {
     .build();
 }
 
+// Save the typed word for this Gmail user, then show the keyword page again.
 function saveKeyword(e) {
   var word = String((e.formInput && e.formInput.keyword) || "")
     .trim()
@@ -118,6 +134,7 @@ function saveKeyword(e) {
     .build();
 }
 
+// Search the last 30 days, ask Grok about each match, label the real ones, and show the results.
 function scanInbox() {
   var keywords = loadKeywords();
   var hits = [];
@@ -189,12 +206,15 @@ function scanInbox() {
     )
     .build();
 }
+
+// Close the current page and return to the page under it.
 function showHome() {
   return CardService.newActionResponseBuilder()
     .setNavigation(CardService.newNavigation().popCard())
     .build();
 }
 
+// Ask the Grok bot for one sentence. GROK_URL is the tunnel address, with no path on the end.
 function grokSentence(keyword, from, subject, snippet) {
   var fallback = "Yes. Normal: New " + keyword + " email from " + (from || "an unknown sender") + ": " + (subject || "(no subject)") + ".";
   var base = PropertiesService.getScriptProperties().getProperty("GROK_URL");
