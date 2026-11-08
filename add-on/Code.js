@@ -1,127 +1,169 @@
+var LABEL_TEXT = "#ffffff";
+var LABEL_COLORS = ["#fb4c2f", "#a479e2", "#ffad47", "#16a765", "#4a86e8"];
+
 function onHomepage() {
   return buildHomeCard();
 }
 
 function loadKeywords() {
-  const raw = PropertiesService.getUserProperties().getProperty("keywords");
-  if (!raw) {
+  var raw = PropertiesService.getUserProperties().getProperty("keywords");
+  if (raw === null) {
     return ["invoice"];
   }
   return JSON.parse(raw);
 }
 
 function buildHomeCard() {
-  const keywords = loadKeywords();
-  const section = CardService.newCardSection()
+  var keywords = loadKeywords();
+  var saved = keywords.length ? keywords.length + " saved" : "None saved";
+  var section = CardService.newCardSection()
+    .addWidget(CardService.newTextParagraph().setText(
+      "Label the last 30 days of mail that matches a word you choose."
+    ))
+    .addWidget(CardService.newDivider())
+    .addWidget(menuRow("Check inbox", "Label mail from the last 30 days", CardService.Icon.EMAIL, "scanInbox"))
+    .addWidget(CardService.newDivider())
+    .addWidget(menuRow("Keywords", saved, CardService.Icon.BOOKMARK, "openKeywords"))
+    .addWidget(CardService.newDivider())
+    .addWidget(menuRow("Reset", "Remove keyword labels", CardService.Icon.DESCRIPTION, "confirmReset"));
+  return CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle("Keyword alerts")
+        .setSubtitle("Inbox, sorted by what you asked for")
+        .setImageUrl("https://www.gstatic.com/images/icons/material/system/1x/bookmark_black_24dp.png")
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+    )
+    .addSection(section)
+    .setFixedFooter(
+      CardService.newFixedFooter().setPrimaryButton(
+        CardService.newTextButton()
+          .setText("Check inbox")
+          .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+          .setBackgroundColor("#1a73e8")
+          .setOnClickAction(CardService.newAction().setFunctionName("scanInbox"))
+      )
+    )
+    .build();
+}
+
+function menuRow(title, detail, icon, functionName) {
+  return CardService.newDecoratedText()
+    .setText(title)
+    .setBottomLabel(detail)
+    .setWrapText(true)
+    .setStartIcon(CardService.newIconImage().setIcon(icon))
+    .setOnClickAction(CardService.newAction().setFunctionName(functionName));
+}
+
+function openKeywords() {
+  return CardService.newActionResponseBuilder()
+    .setNavigation(CardService.newNavigation().pushCard(buildKeywordsCard()))
+    .build();
+}
+
+function buildKeywordsCard() {
+  var keywords = loadKeywords();
+  var section = CardService.newCardSection().setHeader("Saved words");
+  if (keywords.length === 0) {
+    section.addWidget(CardService.newTextParagraph().setText("No words saved yet."));
+  } else {
+    keywords.forEach(function (word) {
+      section.addWidget(
+        CardService.newDecoratedText()
+          .setText(word)
+          .setStartIcon(CardService.newIconImage().setIcon(CardService.Icon.BOOKMARK))
+      );
+    });
+  }
+  section
+    .addWidget(CardService.newDivider())
     .addWidget(
       CardService.newTextInput()
         .setFieldName("keyword")
-        .setTitle("Keyword")
+        .setTitle("Add a keyword")
         .setHint("invoice")
     )
     .addWidget(
       CardService.newTextButton()
         .setText("Save keyword")
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor("#1a73e8")
         .setOnClickAction(CardService.newAction().setFunctionName("saveKeyword"))
     )
     .addWidget(
       CardService.newTextButton()
-        .setText("Check inbox")
-        .setOnClickAction(CardService.newAction().setFunctionName("scanInbox"))
-    )
-    .addWidget(
-  CardService.newTextButton()
-    .setText("Reset")
-    .setOnClickAction(CardService.newAction().setFunctionName("confirmReset"))
-)
-    .addWidget(
-      CardService.newTextParagraph().setText("Saved: " + keywords.join(", "))
+        .setText("Back")
+        .setOnClickAction(CardService.newAction().setFunctionName("showHome"))
     );
   return CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle("Keyword alerts"))
+    .setHeader(CardService.newCardHeader().setTitle("Keywords").setSubtitle("These words are checked in the inbox"))
     .addSection(section)
     .build();
 }
 
 function saveKeyword(e) {
-  const word = String((e.formInput && e.formInput.keyword) || "")
+  var word = String((e.formInput && e.formInput.keyword) || "")
     .trim()
     .toLowerCase();
   if (word) {
-    const keywords = loadKeywords();
+    var keywords = loadKeywords();
     if (keywords.indexOf(word) === -1) {
       keywords.push(word);
     }
-    PropertiesService.getUserProperties().setProperty(
-      "keywords",
-      JSON.stringify(keywords)
-    );
+    PropertiesService.getUserProperties().setProperty("keywords", JSON.stringify(keywords));
   }
   return CardService.newActionResponseBuilder()
-    .setNavigation(CardService.newNavigation().updateCard(buildHomeCard()))
+    .setNavigation(CardService.newNavigation().updateCard(buildKeywordsCard()))
     .build();
 }
 
 function scanInbox() {
-  const keywords = loadKeywords();
-  const hits = [];
-  const matchedThreads = {};
-  const queries = [
-    "in:inbox category:primary newer_than:21d",
-    "in:inbox category:promotions newer_than:21d",
-    "in:inbox category:social newer_than:21d",
-    "in:inbox category:updates newer_than:21d",
-  ];
-  const seen = {};
-  const threads = [];
-  queries.forEach(function (query) {
-    GmailApp.search(query, 0, 25).forEach(function (thread) {
-      if (!seen[thread.getId()]) {
-        seen[thread.getId()] = true;
-        threads.push(thread);
+  var keywords = loadKeywords();
+  var hits = [];
+  var labelMap = loadLabelMap();
+  var askedGrok = false;
+  var section = CardService.newCardSection().setHeader("Last 30 days");
+
+  if (keywords.length === 0) {
+    section.addWidget(CardService.newTextParagraph().setText("Save a keyword first."));
+  }
+
+  keywords.forEach(function (word) {
+    var safe = String(word).replace(/"/g, "");
+    var threads = GmailApp.search('in:inbox "' + safe + '" newer_than:30d', 0, 20);
+    threads.forEach(function (thread) {
+      var message = thread.getMessages().pop();
+      var subject = message.getSubject() || "(no subject)";
+      applyKeywordLabel(thread, word, labelMap);
+      var sentence = "Matched keyword: " + word;
+      if (!askedGrok) {
+        sentence = grokSentence(word, subject);
+        askedGrok = true;
       }
-    });
-  });
-  threads.forEach(function (thread) {
-    const message = thread.getMessages().pop();
-    const subject = message.getSubject() || "";
-    const preview = message.getPlainBody() || "";
-    const haystack = (subject + "\n" + preview).toLowerCase();
-    keywords.forEach(function (word) {
-      if (haystack.indexOf(word) === -1) {
-        return;
-      }
-      matchedThreads[thread.getId()] = true;
-      const labelName = "Keyword/" + word;
-const label = ensureColoredLabel(word);
-thread.addLabel(label);
-hits.push(labelName + " — " + subject + " — " + grokSentence(word, subject));
+      hits.push({ word: word, subject: subject, sentence: sentence });
     });
   });
 
-  const perKeyword = {};
-  hits.forEach(function (line) {
-    const word = String(line).split(" — ")[0].replace("Keyword/", "");
-    perKeyword[word] = (perKeyword[word] || 0) + 1;
-  });
-  const summary = Object.keys(perKeyword).map(function (word) {
-    return word + " " + perKeyword[word];
-  }).join(" · ");
-  const skippedCount = threads.length - Object.keys(matchedThreads).length;
-
-  const section = CardService.newCardSection();
   section.addWidget(
-    CardService.newTextParagraph().setText(
-      hits.length + " hit(s), " + skippedCount + " skipped. " + summary
-    )
+    CardService.newDecoratedText()
+      .setText(hits.length + " hit(s)")
+      .setBottomLabel("Matching mail from the last 30 days")
+      .setStartIcon(CardService.newIconImage().setIcon(CardService.Icon.EMAIL))
   );
   if (hits.length === 0) {
-    section.addWidget(
-      CardService.newTextParagraph().setText("No matches in recent inbox mail.")
-    );
+    section.addWidget(CardService.newTextParagraph().setText("No matches in the last 30 days."));
   } else {
     hits.forEach(function (hit) {
-      section.addWidget(CardService.newTextParagraph().setText(hit));
+      section.addWidget(CardService.newDivider());
+      section.addWidget(
+        CardService.newDecoratedText()
+          .setTopLabel("Keyword/" + hit.word)
+          .setText(hit.sentence)
+          .setBottomLabel(hit.subject)
+          .setWrapText(true)
+          .setStartIcon(CardService.newIconImage().setIcon(CardService.Icon.STAR))
+      );
     });
   }
   section.addWidget(
@@ -130,10 +172,12 @@ hits.push(labelName + " — " + subject + " — " + grokSentence(word, subject))
       .setOnClickAction(CardService.newAction().setFunctionName("showHome"))
   );
   return CardService.newActionResponseBuilder()
+    .setStateChanged(true)
+    .setNotification(CardService.newNotification().setText(hits.length + " message(s) labeled."))
     .setNavigation(
       CardService.newNavigation().pushCard(
         CardService.newCardBuilder()
-          .setHeader(CardService.newCardHeader().setTitle("Hits"))
+          .setHeader(CardService.newCardHeader().setTitle("Results").setSubtitle("Labeled in Gmail"))
           .addSection(section)
           .build()
       )
@@ -169,7 +213,7 @@ function grokSentence(keyword, subject) {
     if (!session.sessionId) {
       return fallback;
     }
-    var deadline = Date.now() + 8000;
+    var deadline = Date.now() + 20000;
     while (Date.now() < deadline) {
       Utilities.sleep(500);
       var events = UrlFetchApp.fetch(
@@ -192,9 +236,6 @@ function grokSentence(keyword, subject) {
   return fallback;
 }
 
-var LABEL_TEXT = "#ffffff";
-var LABEL_COLORS = ["#fb4c2f", "#a479e2", "#ffad47", "#16a765", "#4a86e8"];
-
 function colorForKeyword(word) {
   var sum = 0;
   for (var i = 0; i < word.length; i++) {
@@ -203,43 +244,57 @@ function colorForKeyword(word) {
   return LABEL_COLORS[sum];
 }
 
-function ensureColoredLabel(word) {
+function loadLabelMap() {
+  var map = {};
+  var listed = Gmail.Users.Labels.list("me");
+  (listed.labels || []).forEach(function (label) {
+    map[label.name] = label;
+  });
+  return map;
+}
+
+function applyKeywordLabel(thread, word, labelMap) {
   var name = "Keyword/" + word;
   var background = colorForKeyword(word);
-  var listed = Gmail.Users.Labels.list("me");
-  var existing = null;
-  (listed.labels || []).forEach(function (label) {
-    if (label.name === name) {
-      existing = label;
-    }
-  });
-  if (existing) {
-    if (!existing.color || !existing.color.backgroundColor) {
-      Gmail.Users.Labels.patch({
-        color: { backgroundColor: background, textColor: LABEL_TEXT }
-      }, "me", existing.id);
-    }
-    return GmailApp.getUserLabelByName(name);
+  if (!labelMap) {
+    labelMap = loadLabelMap();
   }
-  Gmail.Users.Labels.create({
-    name: name,
-    labelListVisibility: "labelShow",
-    messageListVisibility: "show",
-    color: { backgroundColor: background, textColor: LABEL_TEXT }
-  }, "me");
-  return GmailApp.getUserLabelByName(name);
+  var existing = labelMap[name];
+  if (!existing) {
+    existing = Gmail.Users.Labels.create({
+      name: name,
+      labelListVisibility: "labelShow",
+      messageListVisibility: "show",
+      color: { backgroundColor: background, textColor: LABEL_TEXT }
+    }, "me");
+    labelMap[name] = existing;
+  } else if (!existing.color || !existing.color.backgroundColor) {
+    Gmail.Users.Labels.patch({
+      color: { backgroundColor: background, textColor: LABEL_TEXT }
+    }, "me", existing.id);
+    existing.color = { backgroundColor: background, textColor: LABEL_TEXT };
+  }
+  Gmail.Users.Threads.modify({ addLabelIds: [existing.id] }, "me", thread.getId());
+  var gmailLabel = GmailApp.getUserLabelByName(name);
+  if (!gmailLabel) {
+    Utilities.sleep(500);
+    gmailLabel = GmailApp.getUserLabelByName(name);
+  }
+  if (gmailLabel) {
+    thread.addLabel(gmailLabel);
+  }
 }
 
 function confirmReset() {
   var section = CardService.newCardSection()
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        "This removes every Keyword label from your mail and clears the saved words."
-      )
-    )
+    .addWidget(CardService.newTextParagraph().setText(
+      "This removes every Keyword label from your mail and clears the saved words."
+    ))
     .addWidget(
       CardService.newTextButton()
         .setText("Remove labels")
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor("#d93025")
         .setOnClickAction(CardService.newAction().setFunctionName("resetAlerts"))
     )
     .addWidget(
@@ -272,9 +327,8 @@ function resetAlerts() {
     Gmail.Users.Labels.remove("me", label.id);
   });
   return CardService.newActionResponseBuilder()
-    .setNavigation(
-      CardService.newNavigation().popCard().updateCard(buildHomeCard())
-    )
+    .setStateChanged(true)
+    .setNavigation(CardService.newNavigation().popCard().updateCard(buildHomeCard()))
     .setNotification(CardService.newNotification().setText("Keyword labels removed."))
     .build();
 }
