@@ -14,26 +14,28 @@ The sentence names the keyword and what the person should do. It is one English 
 
 ## Keywords
 
-| Word | What it means in the demo |
+Each Gmail account saves its own words. Pick a word that already appears in that inbox.
+
+| Example | What a matching email can mean |
 |---|---|
 | spacexsi | High. An account or security alert to handle today. |
 | major league hacking | Normal. A hackathon update worth reading soon. |
 | invoice | High when a payment or deadline is due. Low when it is only a notice that can wait. |
 
-SpaceXSI is the live example. Send one email with SpaceXSI in the subject, click Check inbox, and the sidebar should show a sentence like:
+A High result looks like this:
 
 `Yes. High: SpaceXSI reports a new login. If it was not you, secure the account today.`
 
-The message also gets the colored label `Keyword/spacexsi`.
+The matching message gets a colored label named `Keyword/` plus the saved word, such as `Keyword/invoice`.
 
 ## What the demo does
 
 1. Start the Grok bot and the Cloudflare tunnel.
-2. In the Gmail sidebar, save `spacexsi`.
-3. Send the SpaceXSI test email.
+2. In the Gmail sidebar, save a word that is in this inbox.
+3. Send a test email that contains that same word, or use one that is already there.
 4. Click **Check inbox**.
-5. Show the colored label and the High sentence.
+5. Show the colored label and Grok's sentence.
 
 The sidebar searches the last 30 days and checks up to 10 matching threads for each word. Gmail stops the sidebar after about 30 seconds, so a long run stops early and the next click continues.
 
-If Grok is slow or `GROK_URL` is missing, the sidebar still shows the keyword hit with a plain sentence: `Normal: New spacexsi email from …`. That fallback is not labeled.
+If Grok is slow or `GROK_URL` is missing, the sidebar still shows the keyword hit with a plain sentence: `Normal: New invoice email from …`. That fallback is not labeled.
