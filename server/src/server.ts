@@ -6,8 +6,39 @@ import { authorize } from "./auth.ts";
 
 const KEYWORDS_PATH = path.join(process.cwd(), "keywords.json");
 const PORT = 4317;
+const LABEL_TEXT = "#ffffff";
+const LABEL_COLORS = ["#fb4c2f", "#a479e2", "#ffad47", "#16a766", "#4a86e8"] as const;
+const IMPORTANT_LABEL = "IMPORTANT";
+const CALL_DELAY_MS = 250;
 
-type Hit = { keyword: string; subject: string; from: string; label: string };
+type GmailClient = ReturnType<typeof google.gmail>;
+
+type KeywordRule = {
+  word: string;
+  from: string[];
+};
+
+type StoredKeyword = string | { word: string; from: string | string[] };
+
+type Hit = {
+  keyword: string;
+  subject: string;
+  from: string;
+  label: string;
+  isNew: boolean;
+};
+
+type ScanReport = {
+  hits: Hit[];
+  skippedCount: number;
+  perKeywordCounts: Record<string, number>;
+};
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 function header(
   headers: { name?: string | null; value?: string | null }[] | undefined,
@@ -19,22 +50,6 @@ function header(
   return found?.value ?? "(none)";
 }
 
-async function loadKeywords(): Promise<string[]> {
-  try {
-    const parsed = JSON.parse(await readFile(KEYWORDS_PATH, "utf8")) as unknown;
-    if (!Array.isArray(parsed)) {
-      return ["invoice"];
-    }
-    return parsed.map((word) => String(word).toLowerCase());
-  } catch {
-    return ["invoice"];
-  }
-}
-
-async function saveKeywords(keywords: string[]): Promise<void> {
-  await writeFile(KEYWORDS_PATH, JSON.stringify(keywords, null, 2));
-}
-
 function cleanKeyword(value: string): string | undefined {
   const word = value.trim().toLowerCase();
   if (!/^[a-z0-9][a-z0-9 -]{0,40}$/.test(word)) {
@@ -43,13 +58,152 @@ function cleanKeyword(value: string): string | undefined {
   return word;
 }
 
-async function ensureLabel(
-  gmail: ReturnType<typeof google.gmail>,
-  name: string
-): Promise<string> {
+function cleanSender(value: string): string | undefined {
+  const sender = value.trim().toLowerCase();
+  if (!/^[a-z0-9.-]+$/.test(sender)) {
+    return undefined;
+  }
+  return sender;
+}
+
+function parseRule(entry: unknown): KeywordRule | undefined {
+  if (typeof entry === "string") {
+    const word = cleanKeyword(entry);
+    return word ? { word, from: [] } : undefined;
+  }
+  if (!entry || typeof entry !== "object") {
+    return undefined;
+  }
+  const record = entry as { word?: unknown; from?: unknown };
+  const word = cleanKeyword(typeof record.word === "string" ? record.word : "");
+  if (!word) {
+    return undefined;
+  }
+  const from: string[] = [];
+  if (typeof record.from === "string") {
+    const sender = cleanSender(record.from);
+    if (sender) {
+      from.push(sender);
+    }
+  } else if (Array.isArray(record.from)) {
+    for (const item of record.from) {
+      if (typeof item !== "string") {
+        continue;
+      }
+      const sender = cleanSender(item);
+      if (sender) {
+        from.push(sender);
+      }
+    }
+  }
+  return { word, from };
+}
+
+function storeRule(rule: KeywordRule): StoredKeyword {
+  if (rule.from.length === 0) {
+    return rule.word;
+  }
+  if (rule.from.length === 1) {
+    return { word: rule.word, from: rule.from[0] ?? "" };
+  }
+  return { word: rule.word, from: rule.from };
+}
+
+async function loadRules(): Promise<KeywordRule[]> {
+  try {
+    const parsed = JSON.parse(await readFile(KEYWORDS_PATH, "utf8")) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [{ word: "invoice", from: [] }];
+    }
+    return parsed.flatMap((entry) => {
+      const rule = parseRule(entry);
+      return rule ? [rule] : [];
+    });
+  } catch {
+    return [{ word: "invoice", from: [] }];
+  }
+}
+
+async function saveRules(rules: KeywordRule[]): Promise<void> {
+  const stored = rules.map((rule) => storeRule(rule));
+  await writeFile(KEYWORDS_PATH, JSON.stringify(stored, null, 2));
+}
+
+function colorForKeyword(word: string): string {
+  let sum = 0;
+  for (let index = 0; index < word.length; index += 1) {
+    sum = (sum + word.charCodeAt(index)) % LABEL_COLORS.length;
+  }
+  return LABEL_COLORS[sum] ?? LABEL_COLORS[0];
+}
+
+function scanDays(): number {
+  const parsed = Number(process.env.SCAN_DAYS ?? "1");
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 365) {
+    return 1;
+  }
+  return parsed;
+}
+
+function pollMinutes(): number {
+  const parsed = Number(process.env.POLL_MINUTES ?? "0");
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function keywordQuery(rule: KeywordRule, days: number): string {
+  const quoted = `"${rule.word.replaceAll('"', "")}"`;
+  let query = `in:inbox ${quoted} newer_than:${days}d`;
+  if (rule.from.length === 1) {
+    query += ` from:${rule.from[0]}`;
+  } else if (rule.from.length > 1) {
+    query += ` from:(${rule.from.join(" OR ")})`;
+  }
+  return query;
+}
+
+async function listMessageIds(gmail: GmailClient, query: string): Promise<string[]> {
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+  do {
+    const listed = await gmail.users.messages.list({
+      userId: "me",
+      q: query,
+      maxResults: 100,
+      pageToken,
+    });
+    for (const message of listed.data.messages ?? []) {
+      if (message.id) {
+        ids.push(message.id);
+      }
+    }
+    pageToken = listed.data.nextPageToken ?? undefined;
+    if (pageToken) {
+      await delay(CALL_DELAY_MS);
+    }
+  } while (pageToken);
+  return ids;
+}
+
+async function ensureLabel(gmail: GmailClient, word: string): Promise<string> {
+  const name = `Keyword/${word}`;
+  const background = colorForKeyword(word);
   const listed = await gmail.users.labels.list({ userId: "me" });
+  await delay(CALL_DELAY_MS);
   const existing = listed.data.labels?.find((label) => label.name === name);
   if (existing?.id) {
+    if (!existing.color?.backgroundColor) {
+      await gmail.users.labels.patch({
+        userId: "me",
+        id: existing.id,
+        requestBody: {
+          color: { backgroundColor: background, textColor: LABEL_TEXT },
+        },
+      });
+      await delay(CALL_DELAY_MS);
+    }
     return existing.id;
   }
   const created = await gmail.users.labels.create({
@@ -58,58 +212,87 @@ async function ensureLabel(
       name,
       labelListVisibility: "labelShow",
       messageListVisibility: "show",
+      color: { backgroundColor: background, textColor: LABEL_TEXT },
     },
   });
+  await delay(CALL_DELAY_MS);
   if (!created.data.id) {
     throw new Error(`Could not create label ${name}`);
   }
   return created.data.id;
 }
 
-async function scan(): Promise<Hit[]> {
-  const auth = await authorize();
-  const gmail = google.gmail({ version: "v1", auth });
-  const keywords = await loadKeywords();
-  const list = await gmail.users.messages.list({
-    userId: "me",
-    maxResults: 15,
-    q: "in:inbox",
-  });
-  const hits: Hit[] = [];
-  for (const item of list.data.messages ?? []) {
-    if (!item.id) {
+async function applyLabels(
+  gmail: GmailClient,
+  messageIds: string[],
+  labelIds: string[]
+): Promise<void> {
+  for (let index = 0; index < messageIds.length; index += 1000) {
+    const ids = messageIds.slice(index, index + 1000);
+    if (ids.length === 0) {
       continue;
     }
-    const message = await gmail.users.messages.get({
+    await gmail.users.messages.batchModify({
       userId: "me",
-      id: item.id,
-      format: "metadata",
-      metadataHeaders: ["From", "Subject"],
+      requestBody: { ids, addLabelIds: labelIds },
     });
-    const headers = message.data.payload?.headers;
-    const subject = header(headers, "Subject");
-    const preview = message.data.snippet ?? "";
-    const haystack = `${subject}\n${preview}`.toLowerCase();
-    for (const keyword of keywords) {
-      if (!haystack.includes(keyword)) {
-        continue;
-      }
-      const label = `Keyword/${keyword}`;
-      const labelId = await ensureLabel(gmail, label);
-      await gmail.users.messages.modify({
+    await delay(CALL_DELAY_MS);
+  }
+}
+
+async function scan(): Promise<ScanReport> {
+  const auth = await authorize();
+  const gmail = google.gmail({ version: "v1", auth });
+  const rules = await loadRules();
+  const days = scanDays();
+  const inboxIds = await listMessageIds(gmail, `in:inbox newer_than:${days}d`);
+  const matched = new Set<string>();
+  const hits: Hit[] = [];
+  const perKeywordCounts: Record<string, number> = {};
+
+  for (const rule of rules) {
+    perKeywordCounts[rule.word] = 0;
+    const labelName = `Keyword/${rule.word}`;
+    const labelId = await ensureLabel(gmail, rule.word);
+    const ids = await listMessageIds(gmail, keywordQuery(rule, days));
+    for (const id of ids) {
+      matched.add(id);
+      perKeywordCounts[rule.word] += 1;
+      const message = await gmail.users.messages.get({
         userId: "me",
-        id: item.id,
-        requestBody: { addLabelIds: [labelId] },
+        id,
+        format: "metadata",
+        metadataHeaders: ["From", "Subject"],
       });
+      await delay(CALL_DELAY_MS);
+      const headers = message.data.payload?.headers;
       hits.push({
-        keyword,
-        subject,
+        keyword: rule.word,
+        subject: header(headers, "Subject"),
         from: header(headers, "From"),
-        label,
+        label: labelName,
+        isNew: !message.data.labelIds?.includes(labelId),
       });
     }
+    await applyLabels(gmail, ids, [labelId, IMPORTANT_LABEL]);
   }
-  return hits;
+
+  const skippedCount = inboxIds.filter((id) => !matched.has(id)).length;
+  return { hits, skippedCount, perKeywordCounts };
+}
+
+let scanInProgress = false;
+
+async function runScan(): Promise<ScanReport> {
+  if (scanInProgress) {
+    throw new Error("A scan is already running.");
+  }
+  scanInProgress = true;
+  try {
+    return await scan();
+  } finally {
+    scanInProgress = false;
+  }
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -142,15 +325,17 @@ const page = `<!doctype html>
 </head>
 <body>
   <h1>Keyword alerts</h1>
-  <p>Saved words are checked against the inbox. A hit gets a Gmail label.</p>
+  <p>Saved words are checked against the inbox. A hit gets a colored label and Gmail's Important marker.</p>
   <label for="keyword">Add a keyword</label>
   <input id="keyword" value="invoice" />
   <button id="save" type="button">Save keyword</button>
   <button id="scan" type="button">Check inbox</button>
   <p id="status"></p>
+  <p id="counts"></p>
   <ul id="hits"></ul>
   <script>
     const status = document.querySelector("#status");
+    const counts = document.querySelector("#counts");
     const hits = document.querySelector("#hits");
     document.querySelector("#save").onclick = async () => {
       status.textContent = "Saving…";
@@ -166,6 +351,7 @@ const page = `<!doctype html>
     };
     document.querySelector("#scan").onclick = async () => {
       status.textContent = "Checking the inbox…";
+      counts.textContent = "";
       hits.innerHTML = "";
       const response = await fetch("/scan", { method: "POST" });
       const body = await response.json();
@@ -173,9 +359,11 @@ const page = `<!doctype html>
         status.textContent = body.error;
         return;
       }
-      status.textContent = body.hits.length
-        ? body.hits.length + " hit(s). Open Gmail and look for the label."
-        : "No hits in the latest 15 inbox messages.";
+      const summary = Object.entries(body.perKeywordCounts)
+        .map(([word, count]) => word + " " + count)
+        .join(" · ");
+      status.textContent = body.hits.length + " hit(s), " + body.skippedCount + " skipped.";
+      counts.textContent = summary;
       for (const hit of body.hits) {
         const item = document.createElement("li");
         item.textContent = hit.label + " — " + hit.subject + " — " + hit.from;
@@ -195,7 +383,8 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (request.method === "GET" && url.pathname === "/keywords") {
-      sendJson(response, 200, { keywords: await loadKeywords() });
+      const rules = await loadRules();
+      sendJson(response, 200, { keywords: rules.map((rule) => rule.word) });
       return;
     }
     if (request.method === "POST" && url.pathname === "/keywords") {
@@ -205,16 +394,16 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: "Use a short word or phrase, with no slash." });
         return;
       }
-      const keywords = await loadKeywords();
-      if (!keywords.includes(word)) {
-        keywords.push(word);
-        await saveKeywords(keywords);
+      const rules = await loadRules();
+      if (!rules.some((rule) => rule.word === word)) {
+        rules.push({ word, from: [] });
+        await saveRules(rules);
       }
-      sendJson(response, 200, { keywords });
+      sendJson(response, 200, { keywords: rules.map((rule) => rule.word) });
       return;
     }
     if (request.method === "POST" && url.pathname === "/scan") {
-      sendJson(response, 200, { hits: await scan() });
+      sendJson(response, 200, await runScan());
       return;
     }
     sendJson(response, 404, { error: "Not found" });
@@ -226,4 +415,23 @@ const server = createServer(async (request, response) => {
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log("Keyword alerts at http://127.0.0.1:" + PORT);
+  const minutes = pollMinutes();
+  if (minutes === 0) {
+    console.log("Automatic scan is off. Set POLL_MINUTES to turn it on.");
+    return;
+  }
+  console.log("Automatic scan every " + minutes + " minute(s).");
+  setInterval(() => {
+    void runScan()
+      .then((report) => {
+        for (const hit of report.hits) {
+          if (hit.isNew) {
+            console.log("New hit: " + hit.label + " — " + hit.subject);
+          }
+        }
+      })
+      .catch((error: unknown) => {
+        console.error(error);
+      });
+  }, minutes * 60 * 1000);
 });
