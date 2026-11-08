@@ -91,7 +91,7 @@ queries.forEach(function (query) {
         label = GmailApp.createLabel(labelName);
       }
       thread.addLabel(label);
-      hits.push(labelName + " — " + subject);
+     hits.push(labelName + " — " + subject + " — " + grokSentence(word, subject));
     });
   });
 
@@ -126,4 +126,49 @@ function showHome() {
   return CardService.newActionResponseBuilder()
     .setNavigation(CardService.newNavigation().popCard())
     .build();
+}
+
+function grokSentence(keyword, subject) {
+  var fallback = "Matched keyword: " + keyword;
+  var base = PropertiesService.getScriptProperties().getProperty("GROK_URL");
+  if (!base) {
+    return fallback;
+  }
+  try {
+    var started = UrlFetchApp.fetch(base + "/v1/session", {
+      method: "post",
+      contentType: "application/json",
+      muteHttpExceptions: true,
+      payload: JSON.stringify({
+        message: "Keyword: " + keyword + "\nSubject: " + subject,
+      }),
+    });
+    if (started.getResponseCode() !== 200) {
+      return fallback;
+    }
+    var session = JSON.parse(started.getContentText());
+    if (!session.sessionId) {
+      return fallback;
+    }
+    var deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      Utilities.sleep(500);
+      var events = UrlFetchApp.fetch(
+        base + "/v1/session/" + session.sessionId + "/events?format=json",
+        { muteHttpExceptions: true }
+      );
+      if (events.getResponseCode() !== 200) {
+        continue;
+      }
+      var list = (JSON.parse(events.getContentText()).events) || [];
+      for (var i = list.length - 1; i >= 0; i--) {
+        if (list[i].type === "message.completed" && list[i].data && list[i].data.text) {
+          return list[i].data.text;
+        }
+      }
+    }
+  } catch (err) {
+    return fallback;
+  }
+  return fallback;
 }
