@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { google } from "googleapis";
+import { askAlertBot } from "./alertBot.ts";
 import { authorize } from "./auth.ts";
 
 const KEYWORDS_PATH = path.join(process.cwd(), "keywords.json");
@@ -26,6 +27,7 @@ type Hit = {
   from: string;
   label: string;
   isNew: boolean;
+  sentence: string;
 };
 
 type ScanReport = {
@@ -266,12 +268,22 @@ async function scan(): Promise<ScanReport> {
       });
       await delay(CALL_DELAY_MS);
       const headers = message.data.payload?.headers;
+      const subject = header(headers, "Subject");
+      const from = header(headers, "From");
+      const snippet = message.data.snippet ?? "";
+      const sentence = await askAlertBot({
+        keyword: rule.word,
+        from,
+        subject,
+        snippet,
+      });
       hits.push({
         keyword: rule.word,
-        subject: header(headers, "Subject"),
-        from: header(headers, "From"),
+        subject,
+        from,
         label: labelName,
         isNew: !message.data.labelIds?.includes(labelId),
+        sentence,
       });
     }
     await applyLabels(gmail, ids, [labelId, IMPORTANT_LABEL]);
@@ -320,12 +332,13 @@ const page = `<!doctype html>
     input { width: 100%; padding: 0.5rem; margin: 0.5rem 0 1rem; }
     button { background: #1c1917; color: white; border: 0; padding: 0.5rem 0.8rem; margin-right: 0.5rem; }
     li { margin: 0.8rem 0; }
+    .sentence { font-weight: 600; }
     #status { min-height: 1.5rem; }
   </style>
 </head>
 <body>
   <h1>Keyword alerts</h1>
-  <p>Saved words are checked against the inbox. A hit gets a colored label and Gmail's Important marker.</p>
+  <p>Saved words are checked against the inbox. A hit gets a colored label, Gmail's Important marker, and a one-sentence alert.</p>
   <label for="keyword">Add a keyword</label>
   <input id="keyword" value="invoice" />
   <button id="save" type="button">Save keyword</button>
@@ -366,7 +379,12 @@ const page = `<!doctype html>
       counts.textContent = summary;
       for (const hit of body.hits) {
         const item = document.createElement("li");
-        item.textContent = hit.label + " — " + hit.subject + " — " + hit.from;
+        const sentence = document.createElement("div");
+        sentence.className = "sentence";
+        sentence.textContent = hit.sentence;
+        const detail = document.createElement("div");
+        detail.textContent = hit.label + " — " + hit.subject + " — " + hit.from;
+        item.append(sentence, detail);
         hits.appendChild(item);
       }
     };
@@ -426,7 +444,7 @@ server.listen(PORT, "127.0.0.1", () => {
       .then((report) => {
         for (const hit of report.hits) {
           if (hit.isNew) {
-            console.log("New hit: " + hit.label + " — " + hit.subject);
+            console.log("New hit: " + hit.sentence + " — " + hit.label + " — " + hit.subject);
           }
         }
       })

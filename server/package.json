@@ -2,7 +2,8 @@
   "type": "module",
   "scripts": {
     "list-mail": "tsx src/list-mail.ts",
-    "serve": "tsx src/server.ts"
+    "serve": "tsx src/server.ts",
+    "test-bot": "tsx src/test-bot.ts"
   },
   "dependencies": {
     "@google-cloud/local-auth": "^3.0.1",
