@@ -159,7 +159,7 @@ function scanInbox() {
         snippet = "";
       }
       var sentence = grokSentence(word, from, subject, snippet);
-      var labeled = !/^no\b/i.test(sentence);
+      var labeled = /^yes\b/i.test(sentence);
       if (labeled) {
         applyKeywordLabel(thread, word, labelMap);
       }
@@ -214,12 +214,15 @@ function showHome() {
     .build();
 }
 
-// Ask the Grok bot for one sentence. GROK_URL is the tunnel address, with no path on the end.
+function matcherSentence(keyword, from, subject) {
+  return "Normal: New " + keyword + " email from " + (from || "an unknown sender") + ": " + (subject || "(no subject)") + ".";
+}
+
 function grokSentence(keyword, from, subject, snippet) {
-  var fallback = "Yes. Normal: New " + keyword + " email from " + (from || "an unknown sender") + ": " + (subject || "(no subject)") + ".";
+  var fallback = matcherSentence(keyword, from, subject);
   var base = PropertiesService.getScriptProperties().getProperty("GROK_URL");
   if (!base) {
-    return "No GROK_URL is set.";
+    return fallback;
   }
   base = String(base).trim().replace(/\/$/, "");
   try {
@@ -232,11 +235,11 @@ function grokSentence(keyword, from, subject, snippet) {
       }),
     });
     if (started.getResponseCode() !== 200) {
-      return "Bot returned " + started.getResponseCode() + ".";
+      return fallback;
     }
     var session = JSON.parse(started.getContentText());
     if (!session.sessionId) {
-      return "Bot did not start a session.";
+      return fallback;
     }
     var deadline = Date.now() + 20000;
     while (Date.now() < deadline) {
@@ -255,8 +258,8 @@ function grokSentence(keyword, from, subject, snippet) {
         }
       }
     }
-    return "Bot did not answer in time.";
+    return fallback;
   } catch (err) {
-    return "Bot error: " + err;
+    return fallback;
   }
 }
