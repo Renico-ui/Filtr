@@ -1,7 +1,8 @@
 {
   "type": "module",
   "scripts": {
-    "list-mail": "tsx src/list-mail.ts"
+    "list-mail": "tsx src/list-mail.ts",
+    "serve": "tsx src/server.ts"
   },
   "dependencies": {
     "@google-cloud/local-auth": "^3.0.1",
@@ -12,4 +13,5 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
+  
 }
