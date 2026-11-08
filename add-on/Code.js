@@ -60,7 +60,22 @@ function saveKeyword(e) {
 function scanInbox() {
   const keywords = loadKeywords();
   const hits = [];
-  const threads = GmailApp.search("in:inbox newer_than:7d", 0, 15);
+ const queries = [
+  "in:inbox category:primary newer_than:21d",
+  "in:inbox category:promotions newer_than:21d",
+  "in:inbox category:social newer_than:21d",
+  "in:inbox category:updates newer_than:21d",
+];
+const seen = {};
+const threads = [];
+queries.forEach(function (query) {
+  GmailApp.search(query, 0, 25).forEach(function (thread) {
+    if (!seen[thread.getId()]) {
+      seen[thread.getId()] = true;
+      threads.push(thread);
+    }
+  });
+});
   threads.forEach(function (thread) {
     const message = thread.getMessages().pop();
     const subject = message.getSubject() || "";
