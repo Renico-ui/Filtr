@@ -6,7 +6,11 @@ const SCOPES = ["https://www.googleapis.com/auth/gmail.modify"];
 const CREDENTIALS_PATH = path.join(process.cwd(), "credentials.json");
 const TOKEN_PATH = path.join(process.cwd(), "token.json");
 
-const KEYWORDS = ["invoice"];
+const KEYWORDS = (process.env.KEYWORDS ?? "invoice")
+    .split(",")
+    .map((word) => word.trim())
+    .filter(Boolean);
+const MAX_RESULTS = Number(process.env.MAX_RESULTS ?? 20);
 function matchedKeyword(subject: string, preview: string): string | undefined {
     const haystack = `${subject}\n${preview}`.toLowerCase();
     return KEYWORDS.find((word) => haystack.includes(word.toLowerCase()));
@@ -102,7 +106,7 @@ async function main(): Promise<void> {
     const gmail = google.gmail({ version: "v1", auth });
     const list = await gmail.users.messages.list({
         userId: "me",
-        maxResults: 5,
+        maxResults: MAX_RESULTS,
         q: "in:inbox",
     });
     const messages = list.data.messages ?? [];
@@ -110,7 +114,9 @@ async function main(): Promise<void> {
         console.log("Signed in. The inbox has no messages.");
         return;
     }
-    let hits = 0;
+    type Row = { date: string; from: string; subject: string; keyword?: string };
+    const matched: Row[] = [];
+    const skipped: Row[] = [];
     for (const item of messages) {
         if (!item.id) {
             continue;
@@ -124,20 +130,29 @@ async function main(): Promise<void> {
         const headers = message.data.payload?.headers;
         const subject = header(headers, "Subject");
         const preview = message.data.snippet ?? "";
-        const keyword = matchedKeyword(subject, preview);
-        if (!keyword) {
-            continue;
-        }
-        hits += 1;
-        console.log(`${hits}. keyword: ${keyword}`);
-        console.log(`   ${header(headers, "Date")}`);
-        console.log(`   From: ${header(headers, "From")}`);
-        console.log(`   Subject: ${subject}`);
-        console.log(`   ${preview}`);
-        console.log();
+        const row: Row = {
+            date: header(headers, "Date"),
+            from: header(headers, "From"),
+            subject,
+            keyword: matchedKeyword(subject, preview),
+        };
+        (row.keyword ? matched : skipped).push(row);
     }
-    if (hits === 0) {
-        console.log(`No inbox messages matched: ${KEYWORDS.join(", ")}`);
+    console.log(`Keywords: ${KEYWORDS.join(", ")}`);
+    console.log(`Checked ${matched.length + skipped.length} inbox emails.\n`);
+    console.log(`MATCHED (${matched.length})`);
+    for (const row of matched) {
+        console.log(`  [${row.keyword}] ${row.subject}  (from ${row.from}, ${row.date})`);
+    }
+    console.log(`\nSKIPPED (${skipped.length})`);
+    for (const row of skipped) {
+        console.log(`  ${row.subject}  (from ${row.from}, ${row.date})`);
+    }
+    if (process.env.JSON_OUT) {
+        await writeFile(
+            process.env.JSON_OUT,
+            JSON.stringify({ keywords: KEYWORDS, matched, skipped }, null, 2)
+        );
     }
 }
 main().catch((error: unknown) => {
