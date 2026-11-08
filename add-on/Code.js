@@ -97,7 +97,7 @@ function buildKeywordsCard() {
       CardService.newTextInput()
         .setFieldName("keyword")
         .setTitle("Add a keyword")
-        .setHint("invoice")
+        .setHint("spacexsi")
     )
     .addWidget(
       CardService.newTextButton()
@@ -134,6 +134,18 @@ function saveKeyword(e) {
     .build();
 }
 
+// Label High, Normal, Low, and Yes. Leave No, and a bot-down sentence, unlabeled.
+function shouldLabel(sentence) {
+  var text = String(sentence || "").trim();
+  if (/^no\b/i.test(text)) {
+    return false;
+  }
+  if (/^normal:\s*new\s/i.test(text)) {
+    return false;
+  }
+  return /^(yes\b|high:|normal:|low:)/i.test(text);
+}
+
 // Search the last 30 days, ask Grok about each match, label the real ones, and show the results.
 function scanInbox() {
   var keywords = loadKeywords();
@@ -147,6 +159,7 @@ function scanInbox() {
 
   keywords.forEach(function (word) {
     var safe = String(word).replace(/"/g, "");
+    // Five threads per word keeps this sidebar inside Gmail's time limit.
     var threads = GmailApp.search('in:inbox "' + safe + '" newer_than:30d', 0, 5);
     threads.forEach(function (thread) {
       var message = thread.getMessages().pop();
@@ -159,7 +172,7 @@ function scanInbox() {
         snippet = "";
       }
       var sentence = grokSentence(word, from, subject, snippet);
-      var labeled = /^yes\b/i.test(sentence);
+      var labeled = shouldLabel(sentence);
       if (labeled) {
         applyKeywordLabel(thread, word, labelMap);
       }
@@ -214,10 +227,12 @@ function showHome() {
     .build();
 }
 
+// A plain sentence for when Grok is missing or slow. It is shown, and it is not labeled.
 function matcherSentence(keyword, from, subject) {
   return "Normal: New " + keyword + " email from " + (from || "an unknown sender") + ": " + (subject || "(no subject)") + ".";
 }
 
+// Ask the Grok bot for one sentence. GROK_URL is the tunnel address, with no path on the end.
 function grokSentence(keyword, from, subject, snippet) {
   var fallback = matcherSentence(keyword, from, subject);
   var base = PropertiesService.getScriptProperties().getProperty("GROK_URL");
@@ -262,4 +277,106 @@ function grokSentence(keyword, from, subject, snippet) {
   } catch (err) {
     return fallback;
   }
+}
+
+// Pick a stable color from the word, so the same word stays the same color.
+function colorForKeyword(word) {
+  var sum = 0;
+  for (var i = 0; i < word.length; i++) {
+    sum = (sum + word.charCodeAt(i)) % LABEL_COLORS.length;
+  }
+  return LABEL_COLORS[sum];
+}
+
+// Read the Gmail labels once, so each keyword label can be found by name.
+function loadLabelMap() {
+  var map = {};
+  var listed = Gmail.Users.Labels.list("me");
+  (listed.labels || []).forEach(function (label) {
+    map[label.name] = label;
+  });
+  return map;
+}
+
+// Create the colored Keyword/word label if needed, then put it on this thread.
+function applyKeywordLabel(thread, word, labelMap) {
+  var name = "Keyword/" + word;
+  var background = colorForKeyword(word);
+  if (!labelMap) {
+    labelMap = loadLabelMap();
+  }
+  var existing = labelMap[name];
+  if (!existing) {
+    existing = Gmail.Users.Labels.create({
+      name: name,
+      labelListVisibility: "labelShow",
+      messageListVisibility: "show",
+      color: { backgroundColor: background, textColor: LABEL_TEXT }
+    }, "me");
+    labelMap[name] = existing;
+  } else if (!existing.color || !existing.color.backgroundColor) {
+    Gmail.Users.Labels.patch({
+      color: { backgroundColor: background, textColor: LABEL_TEXT }
+    }, "me", existing.id);
+    existing.color = { backgroundColor: background, textColor: LABEL_TEXT };
+  }
+  Gmail.Users.Threads.modify({ addLabelIds: [existing.id] }, "me", thread.getId());
+  var gmailLabel = GmailApp.getUserLabelByName(name);
+  if (!gmailLabel) {
+    Utilities.sleep(500);
+    gmailLabel = GmailApp.getUserLabelByName(name);
+  }
+  if (gmailLabel) {
+    thread.addLabel(gmailLabel);
+  }
+}
+
+// Ask before removing every Keyword label and the saved words.
+function confirmReset() {
+  var section = CardService.newCardSection()
+    .addWidget(CardService.newTextParagraph().setText(
+      "This removes every Keyword label from your mail and clears the saved words."
+    ))
+    .addWidget(
+      CardService.newTextButton()
+        .setText("Remove labels")
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor("#d93025")
+        .setOnClickAction(CardService.newAction().setFunctionName("resetAlerts"))
+    )
+    .addWidget(
+      CardService.newTextButton()
+        .setText("Cancel")
+        .setOnClickAction(CardService.newAction().setFunctionName("showHome"))
+    );
+  return CardService.newActionResponseBuilder()
+    .setNavigation(
+      CardService.newNavigation().pushCard(
+        CardService.newCardBuilder()
+          .setHeader(CardService.newCardHeader().setTitle("Reset"))
+          .addSection(section)
+          .build()
+      )
+    )
+    .build();
+}
+
+// Delete the Keyword labels and clear the saved words for this Gmail account.
+function resetAlerts() {
+  PropertiesService.getUserProperties().setProperty("keywords", "[]");
+  var listed = Gmail.Users.Labels.list("me");
+  var labels = (listed.labels || []).filter(function (label) {
+    return label.name === "Keyword" || (label.name && label.name.indexOf("Keyword/") === 0);
+  });
+  labels.sort(function (a, b) {
+    return b.name.length - a.name.length;
+  });
+  labels.forEach(function (label) {
+    Gmail.Users.Labels.remove("me", label.id);
+  });
+  return CardService.newActionResponseBuilder()
+    .setStateChanged(true)
+    .setNavigation(CardService.newNavigation().popCard().updateCard(buildHomeCard()))
+    .setNotification(CardService.newNotification().setText("Keyword labels removed."))
+    .build();
 }
