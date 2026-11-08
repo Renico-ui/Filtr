@@ -97,7 +97,6 @@ function buildKeywordsCard() {
       CardService.newTextInput()
         .setFieldName("keyword")
         .setTitle("Add a keyword")
-        .setHint("spacexsi")
     )
     .addWidget(
       CardService.newTextButton()
