@@ -152,26 +152,43 @@ function scanInbox() {
   var hits = [];
   var labelMap = loadLabelMap();
   var section = CardService.newCardSection().setHeader("Last 30 days");
-
+  var started = Date.now();
+  var stop = false;
   if (keywords.length === 0) {
     section.addWidget(CardService.newTextParagraph().setText("Save a keyword first."));
   }
-
   keywords.forEach(function (word) {
+    if (stop) {
+      return;
+    }
     var safe = String(word).replace(/"/g, "");
-    // Five threads per word keeps this sidebar inside Gmail's time limit.
-    var threads = GmailApp.search('in:inbox "' + safe + '" newer_than:30d', 0, 5);
+    var threads = GmailApp.search('in:inbox "' + safe + '" newer_than:30d', 0, 10);
     threads.forEach(function (thread) {
+      if (stop) {
+        return;
+      }
       var message = thread.getMessages().pop();
       var subject = message.getSubject() || "(no subject)";
       var from = message.getFrom() || "";
+      var already = thread.getLabels().some(function (label) {
+        return label.getName() === "Keyword/" + word;
+      });
+      if (already) {
+        hits.push({ word: word, subject: subject, sentence: "Already labeled.", labeled: true });
+        return;
+      }
+      var remaining = 25000 - (Date.now() - started);
+      if (remaining < 4000) {
+        stop = true;
+        return;
+      }
       var snippet = "";
       try {
         snippet = String(message.getPlainBody() || "").slice(0, 500);
       } catch (err) {
         snippet = "";
       }
-      var sentence = grokSentence(word, from, subject, snippet);
+      var sentence = grokSentence(word, from, subject, snippet, Math.min(8000, remaining - 2000));
       var labeled = shouldLabel(sentence);
       if (labeled) {
         applyKeywordLabel(thread, word, labelMap);
@@ -179,11 +196,10 @@ function scanInbox() {
       hits.push({ word: word, subject: subject, sentence: sentence, labeled: labeled });
     });
   });
-
   section.addWidget(
     CardService.newDecoratedText()
       .setText(hits.length + " hit(s)")
-      .setBottomLabel("Matching mail from the last 30 days")
+      .setBottomLabel(stop ? "Stopped early so Gmail would not time out. Click Check inbox again for the rest." : "Matching mail from the last 30 days")
       .setStartIcon(CardService.newIconImage().setIcon(CardService.Icon.EMAIL))
   );
   if (hits.length === 0) {
@@ -208,7 +224,7 @@ function scanInbox() {
   );
   return CardService.newActionResponseBuilder()
     .setStateChanged(true)
-    .setNotification(CardService.newNotification().setText("Check finished."))
+    .setNotification(CardService.newNotification().setText(stop ? "Finished part of the inbox." : "Check finished."))
     .setNavigation(
       CardService.newNavigation().pushCard(
         CardService.newCardBuilder()
@@ -233,8 +249,9 @@ function matcherSentence(keyword, from, subject) {
 }
 
 // Ask the Grok bot for one sentence. GROK_URL is the tunnel address, with no path on the end.
-function grokSentence(keyword, from, subject, snippet) {
+function grokSentence(keyword, from, subject, snippet, maxMs) {
   var fallback = matcherSentence(keyword, from, subject);
+  var waitMs = maxMs || 8000;
   var base = PropertiesService.getScriptProperties().getProperty("GROK_URL");
   if (!base) {
     return fallback;
@@ -256,7 +273,7 @@ function grokSentence(keyword, from, subject, snippet) {
     if (!session.sessionId) {
       return fallback;
     }
-    var deadline = Date.now() + 20000;
+    var deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
       Utilities.sleep(500);
       var events = UrlFetchApp.fetch(
@@ -278,6 +295,7 @@ function grokSentence(keyword, from, subject, snippet) {
     return fallback;
   }
 }
+
 
 // Pick a stable color from the word, so the same word stays the same color.
 function colorForKeyword(word) {
